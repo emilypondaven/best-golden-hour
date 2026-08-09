@@ -420,14 +420,7 @@ function applyTheme(data) {
     } else if (now >= sunsetStart && now <= sunsetEnd) {
       setTheme("sunset");
     } else if (now > sunriseEnd && now < sunsetStart) {
-      // Daytime: choose light or dark depending on how close we are to sunset.
-      const midpoint = new Date((sunriseEnd.getTime() + sunsetStart.getTime()) / 2);
-      if (now >= midpoint) {
-        // Closer to evening — prefer dark / sunset presentation by default.
-        setTheme("sunset");
-      } else {
-        setTheme("day");
-      }
+      setTheme("day");
     } else {
       setTheme("night");
     }

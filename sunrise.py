@@ -55,8 +55,9 @@ def fetch_forecast(lat: float, lon: float) -> list[dict]:
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
         "&daily=sunrise,sunset"
-        "&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
-        "relative_humidity_2m,visibility,precipitation_probability"
+        "&hourly=cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
+        "temperature_2m,dew_point_2m,relative_humidity_2m,visibility,"
+        "precipitation_probability"
         f"&timezone=auto&forecast_days={FORECAST_DAYS}"
     )
     with urllib.request.urlopen(url, timeout=15) as r:
@@ -65,16 +66,28 @@ def fetch_forecast(lat: float, lon: float) -> list[dict]:
     hourly_times = [datetime.fromisoformat(t) for t in d["hourly"]["time"]]
 
     def at(when: datetime) -> dict:
-        """Hourly values at the hour closest to `when`."""
+        """Hourly values at the hour closest to `when`, plus two derived ones."""
         i = min(range(len(hourly_times)),
                 key=lambda k: abs(hourly_times[k] - when))
         h = d["hourly"]
+        low, mid, high = (h["cloud_cover_low"][i], h["cloud_cover_mid"][i],
+                          h["cloud_cover_high"][i])
+        total = h["cloud_cover"][i]
+        temp, dew = h["temperature_2m"][i], h["dew_point_2m"][i]
+        vis = h["visibility"][i]
         return {
-            "cloud_low": h["cloud_cover_low"][i],
-            "cloud_mid": h["cloud_cover_mid"][i],
-            "cloud_high": h["cloud_cover_high"][i],
+            "cloud_total": total,
+            "cloud_low": low,
+            "cloud_mid": mid,
+            "cloud_high": high,
+            # Layers sum above the total => they overlap vertically (a lid).
+            # Clamped: the layer values and the total come from different
+            # derivations and don't always reconcile.
+            "stacking": max(0, (low + mid + high) - total) if total is not None else None,
+            # Temp minus dewpoint. Under ~2C means fog is likely.
+            "fog_risk_c": round(temp - dew, 1) if None not in (temp, dew) else None,
             "humidity": h["relative_humidity_2m"][i],
-            "visibility_km": round((h["visibility"][i] or 0) / 1000),
+            "visibility_km": round(vis / 1000) if vis is not None else None,
             "rain_chance": h["precipitation_probability"][i],
         }
 
@@ -115,8 +128,11 @@ def rules_score(f: dict) -> int:
     elif f["cloud_low"] > 40:
         score -= 25                     # murk sitting on the horizon
 
-    if f["humidity"] > 95 and f["visibility_km"] < 5:
-        score -= 20                     # fog risk
+    if (f.get("fog_risk_c") or 99) < 2:
+        score -= 20                     # fog likely: dewpoint depression tiny
+
+    if (f.get("stacking") or 0) > 60:
+        score -= 10                     # layers stacked into a lid
 
     if (f.get("rain_chance") or 0) > 60:
         score -= 10
@@ -126,48 +142,47 @@ def rules_score(f: dict) -> int:
 
 # ---- 3. the LLM scorer ------------------------------------------
 
-SYSTEM_BRIEF = """You are an expert sunrise-quality forecaster.
-
-What makes a vivid sunrise:
-- Mid or high altitude cloud, roughly 20-70% cover, to catch pink and gold
-  light from below. This is the single most important factor.
-- A clear path near the horizon. Low cloud above about 40% usually means
-  the light never reaches the underside of the higher cloud: grey murk.
-- A fully clear sky is pleasant but plain - a clean gradient, no drama.
-- Very high humidity with low visibility suggests fog, which can either
-  ruin it or make it beautiful; treat it as a risk, and say so.
-- Total overcast at every level is a write-off.
-
-Score each day 0-100. Be decisive and use the full range: most weeks
-contain at least one dud in the teens. Do not cluster everything at 50."""
+BRIEF_PATH = Path(__file__).parent / "prompt.md"
 
 
-def llm_scores(days: list[dict]) -> dict:
-    """Ask Gemini to score the week. Returns {} on any failure."""
+def system_brief() -> str:
+    """The scorer's instructions, kept in prompt.md so they can be edited
+    without touching code. Read fresh each call, so edits apply without a
+    restart (--reload only watches .py files)."""
+    return BRIEF_PATH.read_text(encoding="utf-8")
+
+
+def llm_scores(days: list[dict], place: str = "", lat: float = 0.0) -> dict:
+    """Ask Gemini to score the week. Returns {"_error": ...} on any failure."""
     from google import genai
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return {"_error": "GEMINI_API_KEY not set - the app never saw a key."}
+    if not BRIEF_PATH.exists():
+        return {"_error": f"No prompt file at {BRIEF_PATH}"}
 
     features = [
-        {k: day[k] for k in ("date", "weekday", "sunrise", "cloud_low",
-                             "cloud_mid", "cloud_high", "humidity",
-                             "visibility_km", "rain_chance")}
+        {k: day[k] for k in ("date", "weekday", "sunrise", "cloud_total",
+                             "cloud_low", "cloud_mid", "cloud_high", "stacking",
+                             "fog_risk_c", "humidity", "visibility_km",
+                             "rain_chance")}
         for day in days
     ]
 
-    prompt = f"""{SYSTEM_BRIEF}
+    prompt = f"""Location: {place} (latitude {lat}).
+Scoring the {len(days)} mornings from {days[0]['date']}.
+At this latitude and season, consider how fast the sun clears the horizon
+and how long any colour is likely to last.
 
-Here is the forecast at sunrise for the next {len(days)} days.
-Cloud cover values are percentages by altitude band.
+Conditions at sunrise. Cloud values are percent cover.
 
 {json.dumps(features, indent=2)}
 
 Respond with JSON only, no markdown, in exactly this shape:
 {{
   "days": [{{"date": "YYYY-MM-DD", "score": 0-100,
-             "reason": "max 12 words, concrete, no hedging"}}],
+             "reason": "max 12 words, name the deciding number"}}],
   "best_date": "YYYY-MM-DD",
   "week_summary": "one sentence, under 20 words"
 }}"""
@@ -177,7 +192,8 @@ Respond with JSON only, no markdown, in exactly this shape:
         resp = client.models.generate_content(
             model=MODEL,
             contents=prompt,
-            config={"response_mime_type": "application/json",
+            config={"system_instruction": system_brief(),
+                    "response_mime_type": "application/json",
                     "temperature": 0.3},
         )
         text = (resp.text or "").strip()
@@ -196,7 +212,7 @@ def build_report(place: str) -> dict:
     for day in days:
         day["rules_score"] = rules_score(day)
 
-    llm = llm_scores(days)
+    llm = llm_scores(days, where["place"], where["lat"])
     error = llm.pop("_error", None)
     if error:
         print(f"!  Scoring failed - {error}")
