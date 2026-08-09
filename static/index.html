@@ -51,8 +51,37 @@
     font-weight: 400;
     font-size: clamp(2.4rem, 9vw, 3.4rem);
     line-height: 1;
-    margin: 0 0 1.75rem;
+    margin: 0 0 1.25rem;
   }
+
+  /* ---- search ---- */
+  .search { display: flex; gap: .5rem; margin-bottom: 1.75rem; }
+  .search input {
+    flex: 1;
+    font-family: var(--body);
+    font-size: .95rem;
+    color: var(--frost);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: .6rem .8rem;
+    min-width: 0;
+  }
+  .search input::placeholder { color: var(--haze); }
+  .search input:focus { outline: none; border-color: var(--haze); }
+  .search button {
+    font-family: var(--mono);
+    font-size: .78rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--night);
+    background: var(--gold);
+    border: 0;
+    border-radius: 9px;
+    padding: .6rem 1rem;
+    cursor: pointer;
+  }
+  .search button:hover { background: #ffd489; }
 
   /* ---- hero: the one morning worth the alarm ---- */
   .hero {
@@ -174,15 +203,20 @@
 <main>
   <p class="eyebrow">Sunrise forecast</p>
   <h1>First Light</h1>
+  <form id="search" class="search">
+    <input id="where" type="search" placeholder="London" aria-label="Place name"
+           autocomplete="off" spellcheck="false">
+    <button type="submit">Look up</button>
+  </form>
   <div id="app"><p class="note">Reading the sky&hellip;</p></div>
   <footer><p class="note" id="foot"></p></footer>
 </main>
 
 <script>
-const FALLBACK = { lat: 51.47, lon: -0.37 };   // Hounslow
+const DEFAULT_PLACE = "London";
 const app  = document.getElementById("app");
 const foot = document.getElementById("foot");
-let coords = FALLBACK, ratings = {};
+let place = DEFAULT_PLACE, ratings = {};
 
 // Score bands, described as the sky they predict.
 const BANDS = [
@@ -193,24 +227,27 @@ const BANDS = [
 ];
 const band = s => BANDS.find(b => s >= b.min);
 
-function getLocation() {
-  return new Promise(resolve => {
-    if (!navigator.geolocation) return resolve(FALLBACK);
-    navigator.geolocation.getCurrentPosition(
-      p => resolve({ lat: +p.coords.latitude.toFixed(2), lon: +p.coords.longitude.toFixed(2) }),
-      () => resolve(FALLBACK),
-      { timeout: 6000 }
-    );
-  });
-}
+const form = document.getElementById("search");
+const input = document.getElementById("where");
+form.onsubmit = e => {
+  e.preventDefault();
+  const typed = input.value.trim();
+  if (typed) { place = typed; load(); }
+};
 
 async function load() {
-  coords = await getLocation();
+  app.innerHTML = `<p class="note">Reading the sky over ${place}&hellip;</p>`;
+  foot.textContent = "";
   try {
     const [f, r] = await Promise.all([
-      fetch(`/api/forecast?lat=${coords.lat}&lon=${coords.lon}`),
+      fetch(`/api/forecast?place=${encodeURIComponent(place)}`),
       fetch("/api/ratings"),
     ]);
+    if (f.status === 404) {
+      const { detail } = await f.json();
+      app.innerHTML = `<p class="note">${detail}</p>`;
+      return;
+    }
     if (!f.ok) throw new Error(await f.text());
     ratings = Object.fromEntries((await r.json()).map(x => [x.date, x.rating]));
     render(await f.json());
@@ -224,7 +261,7 @@ async function load() {
 function render(data) {
   const days = [...data.days];
   const best = days.find(d => d.date === data.best_date) || days[0];
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toLocaleDateString("en-CA");
 
   app.innerHTML = `
     <section class="hero">
@@ -241,7 +278,7 @@ function render(data) {
   app.querySelectorAll("[data-rate]").forEach(b => b.onclick = () => rate(b));
 
   foot.textContent =
-    `${coords.lat}, ${coords.lon} · scored ${data.source === "llm" ? "by model" : "by rules only"} `
+    `${data.place} · scored ${data.source === "llm" ? "by model" : "by rules only"} `
     + `at ${data.generated.slice(11, 16)} · data from Open-Meteo`;
 }
 
@@ -277,7 +314,7 @@ async function rate(btn) {
     const res = await fetch("/api/rate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ date, rating: +rating, ...coords }),
+      body: JSON.stringify({ date, rating: +rating, place }),
     });
     if (!res.ok) throw new Error(await res.text());
     ratings[date] = +rating;

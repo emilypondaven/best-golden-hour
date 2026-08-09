@@ -10,25 +10,41 @@ Setup:
     export GEMINI_API_KEY=your-key-here    # free key from aistudio.google.com
 
 Run:
-    python sunrise.py                      # uses DEFAULT_LAT / DEFAULT_LON
-    python sunrise.py 51.47 -0.36          # or pass a location
+    python sunrise.py                      # uses DEFAULT_PLACE
+    python sunrise.py Brighton             # or name anywhere
 """
 
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 from datetime import date, datetime
 from pathlib import Path
-from dotenv import load_dotenv
-load_dotenv()
 
 # ---- config -----------------------------------------------------
-DEFAULT_LAT, DEFAULT_LON = 51.4746, -0.3680   # Hounslow - change to your spot
-MODEL = "gemini-3-flash"
+DEFAULT_PLACE = "London"
+MODEL = "gemini-3-flash-preview"
 SCORES_DIR = Path(__file__).parent / "scores"
 FORECAST_DAYS = 7
 # -----------------------------------------------------------------
+
+
+# ---- 0. where ---------------------------------------------------
+
+def geocode(place: str) -> dict:
+    """Place name -> coordinates, plus a tidy label to show back."""
+    url = ("https://geocoding-api.open-meteo.com/v1/search"
+           f"?name={urllib.parse.quote(place)}&count=1&language=en&format=json")
+    with urllib.request.urlopen(url, timeout=15) as r:
+        results = json.load(r).get("results")
+    if not results:
+        raise LookupError(f"Nowhere called '{place}'. Try adding a country.")
+    hit = results[0]
+    label = ", ".join(x for x in (hit["name"], hit.get("admin1"), hit.get("country")) if x)
+    return {"lat": round(hit["latitude"], 2),
+            "lon": round(hit["longitude"], 2),
+            "place": label}
 
 
 # ---- 1. data ----------------------------------------------------
@@ -132,8 +148,7 @@ def llm_scores(days: list[dict]) -> dict:
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("!  GEMINI_API_KEY not set - using rules scores only.")
-        return {}
+        return {"_error": "GEMINI_API_KEY not set - the app never saw a key."}
 
     features = [
         {k: day[k] for k in ("date", "weekday", "sunrise", "cloud_low",
@@ -170,18 +185,21 @@ Respond with JSON only, no markdown, in exactly this shape:
             text = text.split("```")[1].removeprefix("json").strip()
         return json.loads(text)
     except Exception as e:
-        print(f"!  Scoring failed ({type(e).__name__}: {e}) - falling back to rules.")
-        return {}
+        return {"_error": f"{type(e).__name__}: {e}"}
 
 
 # ---- 4. assemble ------------------------------------------------
 
-def build_report(lat: float, lon: float) -> dict:
-    days = fetch_forecast(lat, lon)
+def build_report(place: str) -> dict:
+    where = geocode(place)
+    days = fetch_forecast(where["lat"], where["lon"])
     for day in days:
         day["rules_score"] = rules_score(day)
 
     llm = llm_scores(days)
+    error = llm.pop("_error", None)
+    if error:
+        print(f"!  Scoring failed - {error}")
     by_date = {d["date"]: d for d in llm.get("days", [])}
 
     for day in days:
@@ -194,26 +212,30 @@ def build_report(lat: float, lon: float) -> dict:
 
     return {
         "generated": datetime.now().isoformat(timespec="seconds"),
-        "lat": lat,
-        "lon": lon,
-        "source": "llm" if llm else "rules",
+        "place": where["place"],
+        "lat": where["lat"],
+        "lon": where["lon"],
+        "source": "llm" if by_date else "rules",
+        "error": error,
         "best_date": best,
         "week_summary": llm.get("week_summary", "Rules estimate only - no LLM scoring."),
         "days": days,
     }
 
 
-def cache_path(lat: float, lon: float) -> Path:
-    return SCORES_DIR / f"{date.today().isoformat()}_{lat:.2f}_{lon:.2f}.json"
+def slug(place: str) -> str:
+    """Filename-safe key: 'Brighton, England, UK' -> 'brighton-england-uk'."""
+    keep = "".join(c if c.isalnum() else " " for c in place.lower())
+    return "-".join(keep.split())[:60] or "unknown"
 
 
-def load_or_create(lat: float, lon: float, force: bool = False) -> dict:
-    """Score at most once per day per location; the UI only reads this file."""
+def load_or_create(place: str, force: bool = False) -> dict:
+    """Score at most once per day per place; the UI only reads this file."""
     SCORES_DIR.mkdir(exist_ok=True)
-    path = cache_path(lat, lon)
+    path = SCORES_DIR / f"{date.today().isoformat()}_{slug(place)}.json"
     if path.exists() and not force:
         return json.loads(path.read_text())
-    report = build_report(lat, lon)
+    report = build_report(place)
     path.write_text(json.dumps(report, indent=2))
     return report
 
@@ -221,7 +243,8 @@ def load_or_create(lat: float, lon: float, force: bool = False) -> dict:
 # ---- 5. CLI -----------------------------------------------------
 
 def show(report: dict) -> None:
-    print(f"\n  {report['week_summary']}\n")
+    print(f"\n  {report['place']}")
+    print(f"  {report['week_summary']}\n")
     for d in sorted(report["days"], key=lambda x: x["score"], reverse=True):
         star = "*" if d["date"] == report["best_date"] else " "
         print(f"  {star} {d['weekday']:<10} {d['sunrise']}  {d['score']:>3}  {d['reason']}")
@@ -229,7 +252,9 @@ def show(report: dict) -> None:
 
 
 if __name__ == "__main__":
-    lat, lon = DEFAULT_LAT, DEFAULT_LON
-    if len(sys.argv) == 3:
-        lat, lon = float(sys.argv[1]), float(sys.argv[2])
-    show(load_or_create(lat, lon, force="--force" in sys.argv))
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    place = " ".join(args) or DEFAULT_PLACE
+    try:
+        show(load_or_create(place, force="--force" in sys.argv))
+    except LookupError as e:
+        print(f"\n  {e}\n")

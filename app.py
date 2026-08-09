@@ -10,12 +10,12 @@ import json
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from sunrise import DEFAULT_LAT, DEFAULT_LON, load_or_create
+from sunrise import DEFAULT_PLACE, load_or_create
 
 BASE = Path(__file__).parent
 LOG = BASE / "log.jsonl"
@@ -24,10 +24,15 @@ app = FastAPI(title="First Light")
 
 
 @app.get("/api/forecast")
-def forecast(lat: float = DEFAULT_LAT, lon: float = DEFAULT_LON):
-    """Scored week for a location. Cached to one scoring run per day."""
+def forecast(place: str = DEFAULT_PLACE):
+    """Scored week for a named place. Cached to one scoring run per day."""
+    place = place.strip()
+    if not place:
+        raise HTTPException(400, "Type somewhere to look up.")
     try:
-        return load_or_create(round(lat, 2), round(lon, 2))
+        return load_or_create(place)
+    except LookupError as e:
+        raise HTTPException(404, str(e))          # no such place
     except Exception as e:
         raise HTTPException(502, f"Could not build a forecast: {e}")
 
@@ -35,8 +40,7 @@ def forecast(lat: float = DEFAULT_LAT, lon: float = DEFAULT_LON):
 class Rating(BaseModel):
     date: str
     rating: int = Field(description="1 for good, -1 for not")
-    lat: float = DEFAULT_LAT
-    lon: float = DEFAULT_LON
+    place: str = DEFAULT_PLACE
 
 
 @app.post("/api/rate")
@@ -50,7 +54,7 @@ def rate(r: Rating):
     if r.date > date.today().isoformat():
         raise HTTPException(400, "that morning hasn't happened yet")
 
-    report = load_or_create(round(r.lat, 2), round(r.lon, 2))
+    report = load_or_create(r.place)
     day = next((d for d in report["days"] if d["date"] == r.date), None)
     if day is None:
         raise HTTPException(404, f"no forecast on file for {r.date}")
@@ -58,8 +62,9 @@ def rate(r: Rating):
     entry = {
         "date": r.date,
         "rating": r.rating,
-        "lat": r.lat,
-        "lon": r.lon,
+        "place": report["place"],
+        "lat": report["lat"],
+        "lon": report["lon"],
         "predicted_score": day["score"],
         "rules_score": day["rules_score"],
         "llm_score": day["llm_score"],
@@ -79,6 +84,11 @@ def ratings():
     if not LOG.exists():
         return []
     return [json.loads(line) for line in LOG.read_text().splitlines() if line.strip()]
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
 
 
 @app.get("/")
