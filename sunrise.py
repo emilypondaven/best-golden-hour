@@ -1,13 +1,19 @@
 """
 First Light - sunrise quality forecaster (core pipeline)
 
-Fetches the next 7 days of forecast from Open-Meteo, scores each sunrise
-with both a rules baseline and Gemini, caches the result to
+Fetches the next 7 days from Open-Meteo, scores every sunrise and sunset
+with both a rules baseline and an LLM, caches the result to
 scores/YYYY-MM-DD_LAT_LON.json, and prints a ranked table.
 
 Setup:
     pip install -r requirements.txt
-    export GEMINI_API_KEY=your-key-here    # free key from aistudio.google.com
+
+Put your keys in a .env file next to this one. All optional - the app
+degrades to rules scores rather than breaking:
+
+    GROQ_API_KEY=gsk_...        console.groq.com
+    GEMINI_API_KEY=...          aistudio.google.com (no free tier in the UK)
+    GEOCODE_API_KEY=...         names your location in the footer
 
 Run:
     python sunrise.py 51.42 -0.27          # coordinates are required
@@ -20,11 +26,19 @@ import urllib.parse
 import urllib.request
 from datetime import date, datetime
 from pathlib import Path
+
 from dotenv import load_dotenv
+
+# Copies .env into os.environ. Without this, a .env file is just a text file
+# sitting on disk that nothing reads.
 load_dotenv()
 
 # ---- config -----------------------------------------------------
-MODEL = "gemini-3-flash-preview"
+# Scoring providers, tried in order until one answers. Add or reorder freely;
+# each entry needs a key in .env and an entry in _CALLERS below.
+PROVIDERS = ["gemini", "groq"]
+GEMINI_MODEL = "gemini-3-flash-preview"   # check aistudio.google.com for current names
+GROQ_MODEL = "openai/gpt-oss-120b"        # check console.groq.com/docs/models
 SCORES_DIR = Path(__file__).parent / "scores"
 FORECAST_DAYS = 7
 # -----------------------------------------------------------------
@@ -34,7 +48,7 @@ FORECAST_DAYS = 7
 
 # Which service your key is for. The rest of the app never reads the label,
 # so if this fails the app carries on and the footer shows coordinates.
-GEOCODER = "google" 
+GEOCODER = "google"          # opencage | locationiq | google
 
 _PROVIDERS = {
     "opencage": (
@@ -181,7 +195,15 @@ def rules_score(f: dict) -> int:
     it's a silent control so LLM disagreements can be reviewed later.
     """
     score = 50
-    upper = max(f["cloud_mid"], f["cloud_high"])
+
+    # Defensive: weather values can be None. Coerce to sensible defaults
+    cloud_mid = f.get("cloud_mid") if f.get("cloud_mid") is not None else 0
+    cloud_high = f.get("cloud_high") if f.get("cloud_high") is not None else 0
+    cloud_low = f.get("cloud_low") if f.get("cloud_low") is not None else 0
+    stacking = f.get("stacking") if f.get("stacking") is not None else 0
+    rain_chance = f.get("rain_chance") if f.get("rain_chance") is not None else 0
+
+    upper = max(cloud_mid, cloud_high)
 
     if 20 <= upper <= 70:
         score += 30                     # cloud up high to catch the light
@@ -190,18 +212,20 @@ def rules_score(f: dict) -> int:
     else:
         score -= 5                      # clear sky: pleasant but plain
 
-    if f["cloud_low"] > 70:
+    if cloud_low > 70:
         score -= 40                     # the horizon is bricked up
-    elif f["cloud_low"] > 40:
+    elif cloud_low > 40:
         score -= 25                     # murk sitting on the horizon
 
-    if (f.get("fog_risk_c") or 99) < 2:
+    # fog_risk_c is temp-dewpoint; only penalise when the value exists
+    fog_risk = f.get("fog_risk_c")
+    if fog_risk is not None and fog_risk < 2:
         score -= 20                     # fog likely: dewpoint depression tiny
 
-    if (f.get("stacking") or 0) > 60:
+    if stacking > 60:
         score -= 10                     # layers stacked into a lid
 
-    if (f.get("rain_chance") or 0) > 60:
+    if rain_chance > 60:
         score -= 10
 
     return max(0, min(100, score))
@@ -219,13 +243,55 @@ def system_brief() -> str:
     return BRIEF_PATH.read_text(encoding="utf-8")
 
 
-def llm_scores(days: list[dict], phase: str, lat: float = 0.0) -> dict:
-    """Ask Gemini to score the week for sunrise or sunset. Returns {"_error": ...} on any failure."""
+def _call_gemini(prompt: str, brief: str) -> str:
+    """Google. Note: the free tier is not available in the EU, UK or
+    Switzerland - expect this one to fail from London."""
     from google import genai
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return {"_error": "GEMINI_API_KEY not set - the app never saw a key."}
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    resp = genai.Client(api_key=key).models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config={"system_instruction": brief,
+                "response_mime_type": "application/json",
+                "temperature": 0.3},
+    )
+    return resp.text or ""
+
+
+def _call_groq(prompt: str, brief: str) -> str:
+    """Groq, through the OpenAI SDK - they speak the same protocol. 1,000
+    requests a day free, which is what makes prompt tuning practical."""
+    from openai import OpenAI
+
+    key = os.environ.get("GROQ_API_KEY")
+    if not key:
+        raise RuntimeError("GROQ_API_KEY not set")
+    client = OpenAI(api_key=key, base_url="https://api.groq.com/openai/v1")
+    resp = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[{"role": "system", "content": brief},
+                  {"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content or ""
+
+
+_CALLERS = {"gemini": _call_gemini, "groq": _call_groq}
+
+
+def llm_scores(days: list[dict], phase: str, lat: float = 0.0) -> dict:
+    """
+    Score a week of sunrises or sunsets. Tries each provider in PROVIDERS
+    until one answers, so a dead key or a retired model name falls through
+    instead of dropping you to rules scores.
+
+    Returns the parsed JSON plus "_provider", or {"_error": ...} if every
+    provider failed.
+    """
     if not BRIEF_PATH.exists():
         return {"_error": f"No prompt file at {BRIEF_PATH}"}
 
@@ -268,21 +334,49 @@ Respond with JSON only, no markdown, in exactly this shape:
   "week_summary": "one sentence, under 20 words"
 }}"""
 
-    try:
-        client = genai.Client(api_key=api_key)
-        resp = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config={"system_instruction": system_brief(),
-                    "response_mime_type": "application/json",
-                    "temperature": 0.3},
-        )
-        text = (resp.text or "").strip()
-        if text.startswith("```"):
-            text = text.split("```")[1].removeprefix("json").strip()
-        return json.loads(text)
-    except Exception as e:
-        return {"_error": f"{type(e).__name__}: {e}"}
+    brief = system_brief()
+    failures = []
+    for name in PROVIDERS:
+        caller = _CALLERS.get(name)
+        if caller is None:
+            failures.append(f"{name}: unknown provider")
+            continue
+        try:
+            text = (caller(prompt, brief) or "").strip()
+            # Some providers return fenced codeblocks or extra text. Try
+            # a tolerant parse: plain json first, then extract braces.
+            try:
+                out = json.loads(text)
+            except Exception:
+                if text.startswith("```"):
+                    # try to get content inside fences
+                    parts = text.split("```")
+                    if len(parts) >= 2:
+                        candidate = parts[1]
+                    else:
+                        candidate = text
+                else:
+                    candidate = text
+                # Fallback: trim to first { ... } block if possible
+                start = candidate.find("{")
+                end = candidate.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    try:
+                        out = json.loads(candidate[start:end+1])
+                    except Exception:
+                        raise
+                else:
+                    raise
+            if not out.get("days"):
+                raise ValueError("no days in response")
+            out["_provider"] = name
+            if failures:
+                print(f"!  {name} scored the {phase}s after: {'; '.join(failures)}")
+            return out
+        except Exception as e:
+            failures.append(f"{name}: {type(e).__name__}: {e}")
+
+    return {"_error": " | ".join(failures)}
 
 
 # ---- 4. assemble ------------------------------------------------
@@ -309,6 +403,7 @@ def build_report(lat: float, lon: float) -> dict:
 
     sun_error = sunrise_llm.pop("_error", None)
     set_error = sunset_llm.pop("_error", None)
+    provider = sunrise_llm.pop("_provider", None) or sunset_llm.pop("_provider", None)
     if sun_error:
         print(f"!  Sunrise scoring failed - {sun_error}")
     if set_error:
@@ -348,6 +443,7 @@ def build_report(lat: float, lon: float) -> dict:
         "lat": lat,
         "lon": lon,
         "source": "llm" if by_date_sunrise or by_date_sunset else "rules",
+        "provider": provider,
         "error": sun_error or set_error,
         "best_date": best_sunrise,
         "best_sunrise_date": best_sunrise,
