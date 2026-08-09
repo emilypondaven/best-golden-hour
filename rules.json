@@ -1,0 +1,29 @@
+{
+  "base_score": 50,
+  "upper_cloud": {
+    "low": 20,
+    "high": 70,
+    "in_range_bonus": 30,
+    "overcast_threshold": 85,
+    "overcast_penalty": -15,
+    "clear_penalty": -5
+  },
+  "low_cloud": {
+    "blocked_threshold": 70,
+    "blocked_penalty": -40,
+    "murky_threshold": 40,
+    "murky_penalty": -25
+  },
+  "fog": {
+    "threshold_c": 2,
+    "penalty": -20
+  },
+  "stacking": {
+    "threshold": 60,
+    "penalty": -10
+  },
+  "rain": {
+    "threshold": 60,
+    "penalty": -10
+  }
+}

@@ -6,7 +6,6 @@ Run:
     open http://127.0.0.1:8000
 """
 
-import json
 from datetime import date
 from pathlib import Path
 
@@ -15,10 +14,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from sunrise import load_or_create, place_name, search_place
+from geocode import place_name, search_place
+from ratings import append as append_rating, read_all as read_ratings
+from storage import load_or_create
 
 BASE = Path(__file__).parent
-LOG = BASE / "log.jsonl"
 
 app = FastAPI(title="First Light")
 
@@ -74,7 +74,7 @@ def whereami(lat: float, lon: float):
 
 
 class Rating(BaseModel):
-    date: str
+    date: date
     rating: int = Field(description="1 for good, -1 for not")
     lat: float
     lon: float
@@ -89,7 +89,7 @@ def rate(r: Rating):
     """
     if r.rating not in (1, -1):
         raise HTTPException(400, "rating must be 1 or -1")
-    if r.date > date.today().isoformat():
+    if r.date > date.today():
         raise HTTPException(400, "that morning hasn't happened yet")
     phase = r.phase.lower()
     if phase not in ("sunrise", "sunset"):
@@ -97,13 +97,13 @@ def rate(r: Rating):
     check(r.lat, r.lon)
 
     report = load_or_create(r.lat, r.lon)
-    day = next((d for d in report["days"] if d["date"] == r.date), None)
+    day = next((d for d in report["days"] if d["date"] == r.date.isoformat()), None)
     if day is None:
         raise HTTPException(404, f"no forecast on file for {r.date}")
 
     block = day[phase]
     entry = {
-        "date": r.date,
+        "date": r.date.isoformat(),
         "phase": phase,
         "rating": r.rating,
         "lat": report["lat"],
@@ -117,17 +117,14 @@ def rate(r: Rating):
                                            "humidity", "visibility_km", "rain_chance")},
         "logged_at": date.today().isoformat(),
     }
-    with LOG.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    append_rating(entry)
     return {"ok": True, "logged": entry["date"]}
 
 
 @app.get("/api/ratings")
 def ratings():
     """Everything logged so far, so the UI can show which days you've rated."""
-    if not LOG.exists():
-        return []
-    return [json.loads(line) for line in LOG.read_text().splitlines() if line.strip()]
+    return read_ratings()
 
 
 @app.get("/favicon.ico")

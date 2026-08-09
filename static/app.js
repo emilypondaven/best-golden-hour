@@ -172,7 +172,7 @@ function render(data) {
   document.querySelectorAll(".row").forEach((el, i) => {
     el.style.animationDelay = `${120 + i * 45}ms`;
   });
-  app.querySelectorAll("[data-rate]").forEach(b => b.onclick = () => rate(b));
+  app.querySelectorAll("[data-rating]").forEach(b => b.onclick = () => rate(b));
 
   foot.textContent =
     `${where.place || data.place || `${data.lat}, ${data.lon}`} · `
@@ -241,13 +241,13 @@ function rateHTML(date, rated) {
   if (rated) return `<p class="rate"><span class="done">Logged
     ${rated === 1 ? "as good" : "as a dud"}</span></p>`;
   return `<div class="rate">
-    <button data-rate="1"  data-date="${date}">Was good</button>
-    <button data-rate="-1" data-date="${date}">Wasn't</button>
+    <button data-rating="1"  data-date="${date}">Was good</button>
+    <button data-rating="-1" data-date="${date}">Wasn't</button>
   </div>`;
 }
 
 async function rate(btn) {
-  const { date, rate: rating } = btn.dataset;
+  const { date, rating } = btn.dataset;
   btn.setAttribute("aria-pressed", "true");
   try {
     const res = await fetch("/api/rate", {

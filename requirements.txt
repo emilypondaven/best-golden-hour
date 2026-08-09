@@ -4,3 +4,5 @@ pydantic
 google-genai
 python-dotenv
 openai
+pytest
+httpx

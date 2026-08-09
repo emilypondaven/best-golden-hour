@@ -9,11 +9,11 @@ python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 export GEMINI_API_KEY=your-key-here     # free from aistudio.google.com
 
-python sunrise.py                       # ranked week in the terminal
+python cli.py                           # ranked week in the terminal
 uvicorn app:app --reload                # then open http://127.0.0.1:8000
 ```
 
-`python sunrise.py 51.47 -0.37` scores a different location. Add `--force`
+`python cli.py 51.47 -0.37` scores a different location. Add `--force`
 to re-score a location you've already run today.
 
 ## How it works
@@ -37,3 +37,13 @@ Every past morning in the UI has two buttons. Tapping one appends a line to
 `log.jsonl` pairing your verdict with the raw features and the predicted
 score. That file is the point of this project: after a few months it's a
 real, personally-labelled dataset for a model that knows your sky.
+
+## Tests
+
+```bash
+pytest
+```
+
+Covers `build_report`'s scoring/fallback logic and the `/api/forecast` and
+`/api/rate` routes, all with fake scorers and a faked `load_or_create` -
+no network calls, no API keys, nothing written to disk.
