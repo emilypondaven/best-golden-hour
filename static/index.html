@@ -37,13 +37,13 @@
 
   /* Theme variants: light for sunrise/day, dark for sunset/night */
   body[data-theme="sunrise"], body[data-theme="day"] {
-    --night: #fff8f2; /* page background (light) */
+    --night: #fbf3eb; /* page background (light) */
     --card: #ffffff;
-    --line: #e6e6e9;
-    --frost: #0b1020; /* primary text */
-    --haze: #6b7280;  /* muted text */
-    --ember: #ff6a3d; /* accent */
-    --gold: #d97706;
+    --line: #d7c7b6;
+    --frost: #111827; /* primary text */
+    --haze: #505765;  /* muted text */
+    --ember: #f97316; /* accent */
+    --gold: #b45309;
     background: var(--night);
     background-image: radial-gradient(120% 60% at 50% 0%, #fff4e6 0%, transparent 60%);
     color: var(--frost);
@@ -93,34 +93,22 @@
     margin: 0 0 1.25rem;
   }
 
-  /* ---- search ---- */
-  .search { display: flex; gap: .5rem; margin-bottom: 1.75rem; }
-  .search input {
-    flex: 1;
-    font-family: var(--body);
-    font-size: .95rem;
-    color: var(--frost);
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    padding: .6rem .8rem;
-    min-width: 0;
-  }
-  .search input::placeholder { color: var(--haze); }
-  .search input:focus { outline: none; border-color: var(--haze); }
-  .search button {
+  /* ---- locate ---- */
+  .locate { margin: 0 0 1.75rem; }
+  .locate button {
     font-family: var(--mono);
     font-size: .78rem;
     letter-spacing: .08em;
     text-transform: uppercase;
-    color: var(--night);
-    background: var(--gold);
-    border: 0;
+    color: var(--haze);
+    background: transparent;
+    border: 1px solid var(--line);
     border-radius: 9px;
-    padding: .6rem 1rem;
+    padding: .55rem .9rem;
     cursor: pointer;
+    transition: border-color .15s, color .15s;
   }
-  .search button:hover { background: #ffd489; }
+  .locate button:hover { color: var(--frost); border-color: var(--haze); }
 
   /* ---- hero: the one morning worth the alarm ---- */
   .hero {
@@ -237,6 +225,32 @@
     cursor: pointer;
   }
   footer { margin-top: 2.5rem; }
+  .search { display: flex; gap: .5rem; margin: 1rem 0 .75rem; }
+  .search input {
+    flex: 1;
+    font-family: var(--body);
+    font-size: .9rem;
+    color: var(--frost);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: .55rem .75rem;
+    min-width: 0;
+  }
+  .search input::placeholder { color: var(--haze); }
+  .search input:focus { outline: none; border-color: var(--haze); }
+  .search button {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--night);
+    background: var(--gold);
+    border: 0;
+    border-radius: 9px;
+    padding: .55rem .9rem;
+    cursor: pointer;
+  }
 
   @keyframes rise { to { opacity: 1; transform: none; } }
   .hero, .row { transform: translateY(10px); }
@@ -246,26 +260,49 @@
 </style>
 </head>
 <body>
+<script>
+  const PRELOAD_THEME_KEY = "first-light-theme";
+  const preloadTheme = localStorage.getItem(PRELOAD_THEME_KEY);
+  if (preloadTheme) {
+    document.body.dataset.theme = preloadTheme;
+  }
+</script>
 <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to sunset (dark) mode" title="Switch to sunset (dark) mode">
   <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
        stroke-linecap="round" stroke-linejoin="round"></svg>
 </button>
 <main>
-  <form id="search" class="search">
-    <input id="where" type="search" placeholder="London" aria-label="Place name"
-           autocomplete="off" spellcheck="false">
-    <button type="submit">Look up</button>
-    <button type="button" id="geolocate">Use my location</button>
-  </form>
   <div id="app"><p class="note">Reading the sky&hellip;</p></div>
-  <footer><p class="note" id="foot"></p></footer>
+  <footer>
+    <p class="note" id="foot"></p>
+    <form id="search" class="search">
+      <input id="where" type="search" placeholder="Somewhere else&hellip;"
+             aria-label="Place name" autocomplete="off" spellcheck="false">
+      <button type="submit">Look up</button>
+    </form>
+    <p class="note"><button type="button" id="geolocate">Use my location</button></p>
+  </footer>
 </main>
 
 <script>
-const DEFAULT_PLACE = "London";
 const app  = document.getElementById("app");
 const foot = document.getElementById("foot");
-let place = DEFAULT_PLACE, ratings = {}, currentPlaceLabel = DEFAULT_PLACE;
+const LOCATION_KEY = "first-light-location";
+
+// Remembered between visits, so GPS and the paid reverse lookup run once
+// rather than on every page load.
+function savedLocation() {
+  try { return JSON.parse(localStorage.getItem(LOCATION_KEY)); }
+  catch { return null; }
+}
+function rememberLocation(loc) {
+  where = loc;
+  try { localStorage.setItem(LOCATION_KEY, JSON.stringify(loc)); } catch {}
+}
+
+let where = savedLocation(), ratings = {};
+// Which phase the UI is currently showing - rate() logs against it.
+let currentPhase = "sunrise";
 
 // Score bands, described as the sky they predict.
 const BANDS = [
@@ -306,54 +343,74 @@ themeToggle.onclick = () => {
   if (currentData) render(currentData);
 };
 
-const form = document.getElementById("search");
-const input = document.getElementById("where");
-const geoButton = document.getElementById("geolocate");
 let currentData = null;
 
-form.onsubmit = e => {
-  e.preventDefault();
-  const typed = input.value.trim();
-  if (typed) { place = typed; currentPlaceLabel = typed; load(); }
-};
-geoButton.onclick = () => useMyLocation();
-
-async function useMyLocation() {
+// GPS + the Google reverse lookup. Runs only when there's nothing stored,
+// or when the user asks again - both cost something, so don't repeat them.
+function useMyLocation() {
   if (!navigator.geolocation) {
-    app.innerHTML = `<p class="note">Geolocation is not supported by your browser.</p>`;
+    app.innerHTML = `<p class="note">Your browser doesn't support geolocation.
+      Search for somewhere below instead.</p>`;
     return;
   }
-  app.innerHTML = `<p class="note">Finding your location…</p>`;
+  app.innerHTML = `<p class="note">Finding your location&hellip;</p>`;
   foot.textContent = "";
   navigator.geolocation.getCurrentPosition(async pos => {
-    const { latitude, longitude } = pos.coords;
+    const lat = +pos.coords.latitude.toFixed(2);
+    const lon = +pos.coords.longitude.toFixed(2);
+    let place = null;
     try {
-      const res = await fetch(`https://geocoding-api.open-meteo.com/v1/reverse?latitude=${latitude.toFixed(2)}&longitude=${longitude.toFixed(2)}&language=en&count=1`);
-      if (!res.ok) throw new Error("Location lookup failed");
-      const data = await res.json();
-      const hit = data.results && data.results[0];
-      if (!hit) throw new Error("No location found");
-      const label = [hit.name, hit.admin1, hit.country].filter(Boolean).join(", ");
-      place = label || DEFAULT_PLACE;
-      currentPlaceLabel = label || DEFAULT_PLACE;
-      input.value = place;
-      load();
-    } catch (error) {
-      app.innerHTML = `<p class="note">Could not resolve your location. Try searching instead.</p>`;
-      console.error(error);
-    }
+      const r = await fetch(`/api/whereami?lat=${lat}&lon=${lon}`);
+      if (r.ok) place = (await r.json()).place;
+    } catch (e) { console.error(e); }   // a missing name is cosmetic
+    rememberLocation({ lat, lon, place });
+    load();
   }, err => {
-    app.innerHTML = `<p class="note">Location access denied or unavailable.</p>`;
+    app.innerHTML = `<p class="note">Couldn't get your location — permission denied
+      or unavailable. <button onclick="useMyLocation()">Try again</button>,
+      or search for somewhere below.</p>`;
     console.error(err);
-  }, { timeout: 8000 });
+  }, { timeout: 8000, maximumAge: 300000 });
+}
+
+// Free geocoder, so searching never spends the Google key. The label comes
+// back with the result, so no reverse lookup is needed either.
+const form = document.getElementById("search");
+const input = document.getElementById("where");
+form.onsubmit = async e => {
+  e.preventDefault();
+  const typed = input.value.trim();
+  if (!typed) return;
+  app.innerHTML = `<p class="note">Looking up ${typed}&hellip;</p>`;
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(typed)}`);
+    if (!r.ok) {
+      const { detail } = await r.json();
+      app.innerHTML = `<p class="note">${detail}</p>`;
+      return;
+    }
+    rememberLocation(await r.json());
+    input.value = "";
+    load();
+  } catch (err) {
+    app.innerHTML = `<p class="note">Lookup failed — try again.</p>`;
+    console.error(err);
+  }
+};
+
+document.getElementById("geolocate").onclick = () => useMyLocation();
+
+function query() {
+  return `lat=${where.lat}&lon=${where.lon}`;
 }
 
 async function load() {
-  app.innerHTML = `<p class="note">Reading the sky over ${place}&hellip;</p>`;
+  if (!where) return useMyLocation();
+  app.innerHTML = `<p class="note">Reading the sky&hellip;</p>`;
   foot.textContent = "";
   try {
     const [f, r] = await Promise.all([
-      fetch(`/api/forecast?place=${encodeURIComponent(place)}`),
+      fetch(`/api/forecast?${query()}`),
       fetch("/api/ratings"),
     ]);
     if (f.status === 404) {
@@ -376,6 +433,7 @@ function render(data) {
   const days = [...data.days];
   const theme = applyTheme(data);
   const phase = data.phase || phaseForTheme(theme);
+  currentPhase = phase;
   const phaseLabel = phase === "sunrise" ? "Sunrise forecast" : "Sunset forecast";
   const phaseTitle = phase === "sunrise" ? "First Light" : "Last Light";
   const phaseSummary = phase === "sunrise" ? data.sunrise_week_summary : data.sunset_week_summary;
@@ -392,7 +450,6 @@ function render(data) {
       <h1>${phaseTitle}</h1>
     </section>
     <section class="hero">
-      <p class="location">Forecast for ${data.place || currentPlaceLabel}</p>
       <p class="day">${best.date === today ? "Today" : best.weekday}, <em>${best[phase]?.time || best.sunrise.time}</em></p>
       <p class="time">${band(bestScore).name} &middot; scored ${bestScore} of 100</p>
       <p class="reason">${phaseSummary}</p>
@@ -405,7 +462,8 @@ function render(data) {
   app.querySelectorAll("[data-rate]").forEach(b => b.onclick = () => rate(b));
 
   foot.textContent =
-    `${data.place} · scored ${data.source === "llm" ? "by model" : "by rules only"} `
+    `${where.place || data.place || `${data.lat}, ${data.lon}`} · `
+    + `scored ${data.source === "llm" ? "by model" : "by rules only"} `
     + `at ${data.generated.slice(11, 16)} · data from Open-Meteo`;
 }
 
@@ -482,7 +540,7 @@ async function rate(btn) {
     const res = await fetch("/api/rate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ date, rating: +rating, place }),
+      body: JSON.stringify({ date, rating: +rating, lat: where.lat, lon: where.lon, phase: currentPhase }),
     });
     if (!res.ok) throw new Error(await res.text());
     ratings[date] = +rating;
@@ -496,7 +554,7 @@ async function rate(btn) {
 
 const initialTheme = localStorage.getItem(THEME_KEY) || document.body.dataset.theme || "night";
 setTheme(initialTheme);
-load();
+where ? load() : useMyLocation();
 </script>
 </body>
 </html>
