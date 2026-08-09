@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0b1020">
-<title>First Light</title>
+<title>First Light — Forecast</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
@@ -251,8 +251,6 @@
        stroke-linecap="round" stroke-linejoin="round"></svg>
 </button>
 <main>
-  <p class="eyebrow">Sunrise forecast</p>
-  <h1>First Light</h1>
   <form id="search" class="search">
     <input id="where" type="search" placeholder="London" aria-label="Place name"
            autocomplete="off" spellcheck="false">
@@ -286,6 +284,7 @@ const SUNSET_ICON  = `<path d="M12 9V2"/><path d="m4.93 10.93 1.41 1.41"/><path 
 const themeToggle = document.getElementById("theme-toggle");
 const themeIcon = document.getElementById("theme-icon");
 const isLightTheme = t => t === "sunrise" || t === "day";
+const phaseForTheme = t => t === "sunset" || t === "night" ? "sunset" : "sunrise";
 
 function paintThemeToggle(theme) {
   const light = isLightTheme(theme);
@@ -304,11 +303,14 @@ themeToggle.onclick = () => {
   const next = isLightTheme(document.body.dataset.theme) ? "sunset" : "sunrise";
   localStorage.setItem(THEME_KEY, next);
   setTheme(next);
+  if (currentData) render(currentData);
 };
 
 const form = document.getElementById("search");
 const input = document.getElementById("where");
 const geoButton = document.getElementById("geolocate");
+let currentData = null;
+
 form.onsubmit = e => {
   e.preventDefault();
   const typed = input.value.trim();
@@ -361,7 +363,8 @@ async function load() {
     }
     if (!f.ok) throw new Error(await f.text());
     ratings = Object.fromEntries((await r.json()).map(x => [x.date, x.rating]));
-    render(await f.json());
+    currentData = await f.json();
+    render(currentData);
   } catch (e) {
     app.innerHTML = `<p class="note">No forecast right now — the weather service
       didn't answer. <button onclick="load()">Try again</button></p>`;
@@ -371,18 +374,30 @@ async function load() {
 
 function render(data) {
   const days = [...data.days];
-  const best = days.find(d => d.date === data.best_date) || days[0];
+  const theme = applyTheme(data);
+  const phase = data.phase || phaseForTheme(theme);
+  const phaseLabel = phase === "sunrise" ? "Sunrise forecast" : "Sunset forecast";
+  const phaseTitle = phase === "sunrise" ? "First Light" : "Last Light";
+  const phaseSummary = phase === "sunrise" ? data.sunrise_week_summary : data.sunset_week_summary;
+  const bestDate = phase === "sunrise" ? data.best_sunrise_date : data.best_sunset_date;
+  const best = days.find(d => d.date === bestDate) || days[0];
+  const bestScore = best[phase]?.scores?.score ?? best.score;
+  const bestReason = best[phase]?.scores?.reason ?? best.reason;
   const today = new Date().toLocaleDateString("en-CA");
 
+  document.title = `${phaseTitle} — First Light`;
   app.innerHTML = `
-    <section class="hero">
-      <p class="label">Worth the alarm</p>
-      <p class="location">Sunrise forecast for ${data.place || currentPlaceLabel}</p>
-      <p class="day">${best.date === today ? "This morning" : best.weekday}, <em>${best.sunrise}</em></p>
-      <p class="time">${band(best.score).name} &middot; scored ${best.score} of 100</p>
-      <p class="reason">${data.week_summary}</p>
+    <section class="phase-head">
+      <p class="eyebrow">${phaseLabel}</p>
+      <h1>${phaseTitle}</h1>
     </section>
-    <section class="week">${days.map(row.bind(null, data, today)).join("")}</section>`;
+    <section class="hero">
+      <p class="location">Forecast for ${data.place || currentPlaceLabel}</p>
+      <p class="day">${best.date === today ? "Today" : best.weekday}, <em>${best[phase]?.time || best.sunrise.time}</em></p>
+      <p class="time">${band(bestScore).name} &middot; scored ${bestScore} of 100</p>
+      <p class="reason">${phaseSummary}</p>
+    </section>
+    <section class="week">${days.map(row.bind(null, data, phase, bestDate, today)).join("")}</section>`;
 
   document.querySelectorAll(".row").forEach((el, i) => {
     el.style.animationDelay = `${120 + i * 45}ms`;
@@ -392,20 +407,17 @@ function render(data) {
   foot.textContent =
     `${data.place} · scored ${data.source === "llm" ? "by model" : "by rules only"} `
     + `at ${data.generated.slice(11, 16)} · data from Open-Meteo`;
-
-  // Apply visual theme based on today's sunrise/sunset times.
-  applyTheme(data);
 }
 
 function applyTheme(data) {
   const saved = localStorage.getItem(THEME_KEY);
-  if (saved) { setTheme(saved); return; }
+  if (saved) { setTheme(saved); return saved; }
   try {
     const today = new Date().toLocaleDateString("en-CA");
     const todayObj = data.days.find(d => d.date === today) || data.days[0];
     const [y, m, d] = (todayObj.date || data.days[0].date).split("-").map(Number);
-    const [srH, srM] = (todayObj.sunrise || "06:00").split(":").map(Number);
-    const [ssH, ssM] = (todayObj.sunset || "18:00").split(":").map(Number);
+    const [srH, srM] = (todayObj.sunrise?.time || "06:00").split(":").map(Number);
+    const [ssH, ssM] = (todayObj.sunset?.time || "18:00").split(":").map(Number);
     const sunrise = new Date(y, m - 1, d, srH, srM);
     const sunset  = new Date(y, m - 1, d, ssH, ssM);
     const now = new Date();
@@ -417,32 +429,40 @@ function applyTheme(data) {
 
     if (now >= sunriseStart && now <= sunriseEnd) {
       setTheme("sunrise");
+      return "sunrise";
     } else if (now >= sunsetStart && now <= sunsetEnd) {
       setTheme("sunset");
+      return "sunset";
     } else if (now > sunriseEnd && now < sunsetStart) {
       setTheme("day");
+      return "day";
     } else {
       setTheme("night");
+      return "night";
     }
   } catch (e) {
     // fallback: leave default
     console.warn("Theme application failed:", e);
+    return document.body.dataset.theme || "night";
   }
 }
 
-function row(data, today, d) {
+function row(data, phase, bestDate, today, d) {
   const past = d.date <= today;
   const rated = ratings[d.date];
+  const phaseData = d[phase] || d.sunrise;
+  const score = phaseData.scores?.score ?? d.score;
+  const reason = phaseData.scores?.reason ?? d.reason;
   return `
-    <article class="row ${d.date === data.best_date ? "is-best" : ""}">
-      <div class="horizon" style="background:${band(d.score).css}"></div>
+    <article class="row ${d.date === bestDate ? "is-best" : ""}">
+      <div class="horizon" style="background:${band(score).css}"></div>
       <div>
         <p class="day-name">${d.date === today ? "Today" : d.weekday}</p>
-        <p class="meta">${d.sunrise} &middot; ${band(d.score).name}</p>
-        <p class="reason">${d.reason}</p>
+        <p class="meta">${phaseData.time} &middot; ${band(score).name}</p>
+        <p class="reason">${reason}</p>
         ${past ? rateHTML(d.date, rated) : ""}
       </div>
-      <div class="score">${d.score}</div>
+      <div class="score">${score}</div>
     </article>`;
 }
 
@@ -474,7 +494,8 @@ async function rate(btn) {
   }
 }
 
-paintThemeToggle(localStorage.getItem(THEME_KEY) || document.body.dataset.theme || "night");
+const initialTheme = localStorage.getItem(THEME_KEY) || document.body.dataset.theme || "night";
+setTheme(initialTheme);
 load();
 </script>
 </body>

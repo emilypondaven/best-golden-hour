@@ -24,13 +24,24 @@ app = FastAPI(title="First Light")
 
 
 @app.get("/api/forecast")
-def forecast(place: str = DEFAULT_PLACE):
+def forecast(place: str = DEFAULT_PLACE, phase: str | None = None):
     """Scored week for a named place. Cached to one scoring run per day."""
     place = place.strip()
     if not place:
         raise HTTPException(400, "Type somewhere to look up.")
+    if phase is not None and phase.lower() not in ("sunrise", "sunset"):
+        raise HTTPException(400, "phase must be sunrise or sunset")
     try:
-        return load_or_create(place)
+        report = load_or_create(place)
+        if phase is None:
+            return report
+        phase = phase.lower()
+        return {
+            **report,
+            "phase": phase,
+            "best_date": report[f"best_{phase}_date"],
+            "week_summary": report[f"{phase}_week_summary"],
+        }
     except LookupError as e:
         raise HTTPException(404, str(e))          # no such place
     except Exception as e:
@@ -69,9 +80,32 @@ def rate(r: Rating):
         "rules_score": day["rules_score"],
         "llm_score": day["llm_score"],
         "reason": day["reason"],
-        "features": {k: day[k] for k in ("cloud_total", "cloud_low", "cloud_mid",
-                                         "cloud_high", "stacking", "fog_risk_c",
-                                         "humidity", "visibility_km", "rain_chance")},
+        "features": {
+            "sunrise": {
+                "time": day["sunrise"]["time"],
+                "cloud_total": day["sunrise"]["cloud_total"],
+                "cloud_low": day["sunrise"]["cloud_low"],
+                "cloud_mid": day["sunrise"]["cloud_mid"],
+                "cloud_high": day["sunrise"]["cloud_high"],
+                "stacking": day["sunrise"]["stacking"],
+                "fog_risk_c": day["sunrise"]["fog_risk_c"],
+                "humidity": day["sunrise"]["humidity"],
+                "visibility_km": day["sunrise"]["visibility_km"],
+                "rain_chance": day["sunrise"]["rain_chance"],
+            },
+            "sunset": {
+                "time": day["sunset"]["time"],
+                "cloud_total": day["sunset"]["cloud_total"],
+                "cloud_low": day["sunset"]["cloud_low"],
+                "cloud_mid": day["sunset"]["cloud_mid"],
+                "cloud_high": day["sunset"]["cloud_high"],
+                "stacking": day["sunset"]["stacking"],
+                "fog_risk_c": day["sunset"]["fog_risk_c"],
+                "humidity": day["sunset"]["humidity"],
+                "visibility_km": day["sunset"]["visibility_km"],
+                "rain_chance": day["sunset"]["rain_chance"],
+            },
+        },
         "logged_at": date.today().isoformat(),
     }
     with LOG.open("a") as f:

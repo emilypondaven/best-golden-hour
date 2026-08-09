@@ -98,10 +98,14 @@ def fetch_forecast(lat: float, lon: float) -> list[dict]:
         days.append({
             "date": sunrise_iso[:10],
             "weekday": sunrise.strftime("%A"),
-            "sunrise": sunrise_iso[11:16],
-            "sunset": sunset_iso[11:16],
-            **at(sunrise),
-            "evening": at(sunset),
+            "sunrise": {
+                "time": sunrise_iso[11:16],
+                **at(sunrise),
+            },
+            "sunset": {
+                "time": sunset_iso[11:16],
+                **at(sunset),
+            },
         })
     return days
 
@@ -152,8 +156,8 @@ def system_brief() -> str:
     return BRIEF_PATH.read_text(encoding="utf-8")
 
 
-def llm_scores(days: list[dict], place: str = "", lat: float = 0.0) -> dict:
-    """Ask Gemini to score the week. Returns {"_error": ...} on any failure."""
+def llm_scores(days: list[dict], phase: str, place: str = "", lat: float = 0.0) -> dict:
+    """Ask Gemini to score the week for sunrise or sunset. Returns {"_error": ...} on any failure."""
     from google import genai
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -162,20 +166,34 @@ def llm_scores(days: list[dict], place: str = "", lat: float = 0.0) -> dict:
     if not BRIEF_PATH.exists():
         return {"_error": f"No prompt file at {BRIEF_PATH}"}
 
+    phase = phase.lower()
+    if phase not in ("sunrise", "sunset"):
+        return {"_error": f"Unknown phase '{phase}'; expected sunrise or sunset."}
+
     features = [
-        {k: day[k] for k in ("date", "weekday", "sunrise", "cloud_total",
-                             "cloud_low", "cloud_mid", "cloud_high", "stacking",
-                             "fog_risk_c", "humidity", "visibility_km",
-                             "rain_chance")}
+        {
+            "date": day["date"],
+            "weekday": day["weekday"],
+            "time": day[phase]["time"],
+            "cloud_total": day[phase]["cloud_total"],
+            "cloud_low": day[phase]["cloud_low"],
+            "cloud_mid": day[phase]["cloud_mid"],
+            "cloud_high": day[phase]["cloud_high"],
+            "stacking": day[phase]["stacking"],
+            "fog_risk_c": day[phase]["fog_risk_c"],
+            "humidity": day[phase]["humidity"],
+            "visibility_km": day[phase]["visibility_km"],
+            "rain_chance": day[phase]["rain_chance"],
+        }
         for day in days
     ]
 
     prompt = f"""Location: {place} (latitude {lat}).
-Scoring the {len(days)} mornings from {days[0]['date']}.
+Scoring the {len(days)} {phase}s from {days[0]['date']}.
 At this latitude and season, consider how fast the sun clears the horizon
 and how long any colour is likely to last.
 
-Conditions at sunrise. Cloud values are percent cover.
+Conditions at {phase}. Cloud values are percent cover.
 
 {json.dumps(features, indent=2)}
 
@@ -210,31 +228,71 @@ def build_report(place: str) -> dict:
     where = geocode(place)
     days = fetch_forecast(where["lat"], where["lon"])
     for day in days:
-        day["rules_score"] = rules_score(day)
+        day["sunrise"]["scores"] = {
+            "rules_score": rules_score(day["sunrise"]),
+            "llm_score": None,
+            "reason": "Rules estimate only.",
+            "score": None,
+        }
+        day["sunset"]["scores"] = {
+            "rules_score": rules_score(day["sunset"]),
+            "llm_score": None,
+            "reason": "Rules estimate only.",
+            "score": None,
+        }
 
-    llm = llm_scores(days, where["place"], where["lat"])
-    error = llm.pop("_error", None)
-    if error:
-        print(f"!  Scoring failed - {error}")
-    by_date = {d["date"]: d for d in llm.get("days", [])}
+    sunrise_llm = llm_scores(days, "sunrise", where["place"], where["lat"])
+    sunset_llm = llm_scores(days, "sunset", where["place"], where["lat"])
+
+    sun_error = sunrise_llm.pop("_error", None)
+    set_error = sunset_llm.pop("_error", None)
+    if sun_error:
+        print(f"!  Sunrise scoring failed - {sun_error}")
+    if set_error:
+        print(f"!  Sunset scoring failed - {set_error}")
+
+    by_date_sunrise = {d["date"]: d for d in sunrise_llm.get("days", [])}
+    by_date_sunset = {d["date"]: d for d in sunset_llm.get("days", [])}
 
     for day in days:
-        scored = by_date.get(day["date"])
-        day["llm_score"] = scored["score"] if scored else None
-        day["reason"] = scored["reason"] if scored else "Rules estimate only."
-        day["score"] = day["llm_score"] if day["llm_score"] is not None else day["rules_score"]
+        sunrise_scored = by_date_sunrise.get(day["date"])
+        if sunrise_scored:
+            day["sunrise"]["scores"]["llm_score"] = sunrise_scored["score"]
+            day["sunrise"]["scores"]["reason"] = sunrise_scored["reason"]
+            day["sunrise"]["scores"]["score"] = sunrise_scored["score"]
+        else:
+            day["sunrise"]["scores"]["score"] = day["sunrise"]["scores"]["rules_score"]
 
-    best = llm.get("best_date") or max(days, key=lambda d: d["score"])["date"]
+        sunset_scored = by_date_sunset.get(day["date"])
+        if sunset_scored:
+            day["sunset"]["scores"]["llm_score"] = sunset_scored["score"]
+            day["sunset"]["scores"]["reason"] = sunset_scored["reason"]
+            day["sunset"]["scores"]["score"] = sunset_scored["score"]
+        else:
+            day["sunset"]["scores"]["score"] = day["sunset"]["scores"]["rules_score"]
+
+        # keep top-level backward compatibility using sunrise scores by default
+        day["rules_score"] = day["sunrise"]["scores"]["rules_score"]
+        day["llm_score"] = day["sunrise"]["scores"]["llm_score"]
+        day["reason"] = day["sunrise"]["scores"]["reason"]
+        day["score"] = day["sunrise"]["scores"]["score"]
+
+    best_sunrise = sunrise_llm.get("best_date") or max(days, key=lambda d: d["sunrise"]["scores"]["score"])["date"]
+    best_sunset = sunset_llm.get("best_date") or max(days, key=lambda d: d["sunset"]["scores"]["score"])["date"]
 
     return {
         "generated": datetime.now().isoformat(timespec="seconds"),
         "place": where["place"],
         "lat": where["lat"],
         "lon": where["lon"],
-        "source": "llm" if by_date else "rules",
-        "error": error,
-        "best_date": best,
-        "week_summary": llm.get("week_summary", "Rules estimate only - no LLM scoring."),
+        "source": "llm" if by_date_sunrise or by_date_sunset else "rules",
+        "error": sun_error or set_error,
+        "best_date": best_sunrise,
+        "best_sunrise_date": best_sunrise,
+        "best_sunset_date": best_sunset,
+        "week_summary": sunrise_llm.get("week_summary", "Rules estimate only - no LLM scoring."),
+        "sunrise_week_summary": sunrise_llm.get("week_summary", "Rules estimate only - no LLM scoring."),
+        "sunset_week_summary": sunset_llm.get("week_summary", "Rules estimate only - no LLM scoring."),
         "days": days,
     }
 
@@ -263,7 +321,7 @@ def show(report: dict) -> None:
     print(f"  {report['week_summary']}\n")
     for d in sorted(report["days"], key=lambda x: x["score"], reverse=True):
         star = "*" if d["date"] == report["best_date"] else " "
-        print(f"  {star} {d['weekday']:<10} {d['sunrise']}  {d['score']:>3}  {d['reason']}")
+        print(f"  {star} {d['weekday']:<10} {d['sunrise']['time']}  {d['score']:>3}  {d['reason']}")
     print()
 
 
