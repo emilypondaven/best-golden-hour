@@ -9,6 +9,7 @@ Run:
 import json
 from datetime import date
 from pathlib import Path
+import urllib.request
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
@@ -21,6 +22,44 @@ BASE = Path(__file__).parent
 LOG = BASE / "log.jsonl"
 
 app = FastAPI(title="First Light")
+
+
+@app.get("/api/reverse")
+def reverse(lat: float, lon: float):
+    """Server-side reverse geocoding to avoid CORS issues for the frontend.
+
+    Tries Open-Meteo's reverse endpoint first, then falls back to
+    Nominatim if needed. Returns JSON {"place": "Label"} or 404.
+    """
+    # Try Open-Meteo reverse geocoding
+    try:
+        url = (
+            f"https://geocoding-api.open-meteo.com/v1/reverse?latitude={lat}&longitude={lon}"
+            "&language=en&count=1"
+        )
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.load(r)
+        results = data.get("results")
+        if results:
+            hit = results[0]
+            label = ", ".join(x for x in (hit.get("name"), hit.get("admin1"), hit.get("country")) if x)
+            return {"place": label}
+    except Exception:
+        pass
+
+    # Fallback to Nominatim
+    try:
+        url2 = f"https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat={lat}&lon={lon}"
+        with urllib.request.urlopen(url2, timeout=10) as r:
+            d2 = json.load(r)
+        addr = d2.get("address", {})
+        place = addr.get("city") or addr.get("town") or addr.get("village") or addr.get("county") or d2.get("display_name")
+        if place:
+            return {"place": place}
+    except Exception:
+        pass
+
+    raise HTTPException(404, "Could not resolve those coordinates to a place name.")
 
 
 @app.get("/api/forecast")

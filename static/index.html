@@ -35,7 +35,46 @@
     -webkit-font-smoothing: antialiased;
   }
 
+  /* Theme variants: light for sunrise/day, dark for sunset/night */
+  body[data-theme="sunrise"], body[data-theme="day"] {
+    --night: #fff8f2; /* page background (light) */
+    --card: #ffffff;
+    --line: #e6e6e9;
+    --frost: #0b1020; /* primary text */
+    --haze: #6b7280;  /* muted text */
+    --ember: #ff6a3d; /* accent */
+    --gold: #d97706;
+    background: var(--night);
+    background-image: radial-gradient(120% 60% at 50% 0%, #fff4e6 0%, transparent 60%);
+    color: var(--frost);
+  }
+
+  body[data-theme="sunset"], body[data-theme="night"] {
+    /* keep the existing darker palette (defaults are set in :root) */
+  }
+
   main { max-width: 40rem; margin: 0 auto; }
+
+  /* ---- theme toggle ---- */
+  .theme-toggle {
+    position: fixed;
+    top: 1.25rem;
+    right: 1.25rem;
+    width: 2.5rem;
+    height: 2.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    background: var(--card);
+    color: var(--gold);
+    cursor: pointer;
+    z-index: 20;
+    transition: border-color .15s, transform .15s;
+  }
+  .theme-toggle:hover { border-color: var(--haze); transform: scale(1.06); }
+  .theme-toggle svg { width: 18px; height: 18px; display: block; }
 
   /* ---- masthead ---- */
   .eyebrow {
@@ -102,6 +141,13 @@
     text-transform: uppercase;
     color: var(--ember);
     margin: 0 0 .5rem;
+  }
+  .hero .location {
+    font-family: var(--mono);
+    font-size: .9rem;
+    letter-spacing: .08em;
+    color: var(--gold);
+    margin: 0 0 .65rem;
   }
   .hero .day {
     font-family: var(--display);
@@ -200,6 +246,10 @@
 </style>
 </head>
 <body>
+<button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to sunset (dark) mode" title="Switch to sunset (dark) mode">
+  <svg id="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round"></svg>
+</button>
 <main>
   <p class="eyebrow">Sunrise forecast</p>
   <h1>First Light</h1>
@@ -207,6 +257,7 @@
     <input id="where" type="search" placeholder="London" aria-label="Place name"
            autocomplete="off" spellcheck="false">
     <button type="submit">Look up</button>
+    <button type="button" id="geolocate">Use my location</button>
   </form>
   <div id="app"><p class="note">Reading the sky&hellip;</p></div>
   <footer><p class="note" id="foot"></p></footer>
@@ -216,7 +267,7 @@
 const DEFAULT_PLACE = "London";
 const app  = document.getElementById("app");
 const foot = document.getElementById("foot");
-let place = DEFAULT_PLACE, ratings = {};
+let place = DEFAULT_PLACE, ratings = {}, currentPlaceLabel = DEFAULT_PLACE;
 
 // Score bands, described as the sky they predict.
 const BANDS = [
@@ -227,13 +278,73 @@ const BANDS = [
 ];
 const band = s => BANDS.find(b => s >= b.min);
 
+// ---- theme toggle: light = sunrise, dark = sunset ----
+const THEME_KEY = "first-light-theme";
+const SUNRISE_ICON = `<path d="M12 2v7"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m17 8-5 5-5-5"/><path d="M16 18a4 4 0 0 0-8 0"/>`;
+const SUNSET_ICON  = `<path d="M12 9V2"/><path d="m4.93 10.93 1.41 1.41"/><path d="M2 18h2"/><path d="M20 18h2"/><path d="m19.07 10.93-1.41 1.41"/><path d="M22 22H2"/><path d="m7 8 5-5 5 5"/><path d="M16 18a4 4 0 0 0-8 0"/>`;
+
+const themeToggle = document.getElementById("theme-toggle");
+const themeIcon = document.getElementById("theme-icon");
+const isLightTheme = t => t === "sunrise" || t === "day";
+
+function paintThemeToggle(theme) {
+  const light = isLightTheme(theme);
+  themeIcon.innerHTML = light ? SUNRISE_ICON : SUNSET_ICON;
+  const label = `Switch to ${light ? "sunset (dark)" : "sunrise (light)"} mode`;
+  themeToggle.setAttribute("aria-label", label);
+  themeToggle.title = label;
+}
+
+function setTheme(theme) {
+  document.body.dataset.theme = theme;
+  paintThemeToggle(theme);
+}
+
+themeToggle.onclick = () => {
+  const next = isLightTheme(document.body.dataset.theme) ? "sunset" : "sunrise";
+  localStorage.setItem(THEME_KEY, next);
+  setTheme(next);
+};
+
 const form = document.getElementById("search");
 const input = document.getElementById("where");
+const geoButton = document.getElementById("geolocate");
 form.onsubmit = e => {
   e.preventDefault();
   const typed = input.value.trim();
-  if (typed) { place = typed; load(); }
+  if (typed) { place = typed; currentPlaceLabel = typed; load(); }
 };
+geoButton.onclick = () => useMyLocation();
+
+async function useMyLocation() {
+  if (!navigator.geolocation) {
+    app.innerHTML = `<p class="note">Geolocation is not supported by your browser.</p>`;
+    return;
+  }
+  app.innerHTML = `<p class="note">Finding your location…</p>`;
+  foot.textContent = "";
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const { latitude, longitude } = pos.coords;
+    try {
+      const res = await fetch(`https://geocoding-api.open-meteo.com/v1/reverse?latitude=${latitude.toFixed(2)}&longitude=${longitude.toFixed(2)}&language=en&count=1`);
+      if (!res.ok) throw new Error("Location lookup failed");
+      const data = await res.json();
+      const hit = data.results && data.results[0];
+      if (!hit) throw new Error("No location found");
+      const label = [hit.name, hit.admin1, hit.country].filter(Boolean).join(", ");
+      place = label || DEFAULT_PLACE;
+      currentPlaceLabel = label || DEFAULT_PLACE;
+      input.value = place;
+      load();
+    } catch (error) {
+      app.innerHTML = `<p class="note">Could not resolve your location. Try searching instead.</p>`;
+      console.error(error);
+    }
+  }, err => {
+    app.innerHTML = `<p class="note">Location access denied or unavailable.</p>`;
+    console.error(err);
+  }, { timeout: 8000 });
+}
 
 async function load() {
   app.innerHTML = `<p class="note">Reading the sky over ${place}&hellip;</p>`;
@@ -266,6 +377,7 @@ function render(data) {
   app.innerHTML = `
     <section class="hero">
       <p class="label">Worth the alarm</p>
+      <p class="location">Sunrise forecast for ${data.place || currentPlaceLabel}</p>
       <p class="day">${best.date === today ? "This morning" : best.weekday}, <em>${best.sunrise}</em></p>
       <p class="time">${band(best.score).name} &middot; scored ${best.score} of 100</p>
       <p class="reason">${data.week_summary}</p>
@@ -280,6 +392,49 @@ function render(data) {
   foot.textContent =
     `${data.place} · scored ${data.source === "llm" ? "by model" : "by rules only"} `
     + `at ${data.generated.slice(11, 16)} · data from Open-Meteo`;
+
+  // Apply visual theme based on today's sunrise/sunset times.
+  applyTheme(data);
+}
+
+function applyTheme(data) {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved) { setTheme(saved); return; }
+  try {
+    const today = new Date().toLocaleDateString("en-CA");
+    const todayObj = data.days.find(d => d.date === today) || data.days[0];
+    const [y, m, d] = (todayObj.date || data.days[0].date).split("-").map(Number);
+    const [srH, srM] = (todayObj.sunrise || "06:00").split(":").map(Number);
+    const [ssH, ssM] = (todayObj.sunset || "18:00").split(":").map(Number);
+    const sunrise = new Date(y, m - 1, d, srH, srM);
+    const sunset  = new Date(y, m - 1, d, ssH, ssM);
+    const now = new Date();
+
+    const sunriseStart = new Date(sunrise.getTime() - 60 * 60 * 1000); // -1h
+    const sunriseEnd   = new Date(sunrise.getTime() + 2 * 60 * 60 * 1000); // +2h
+    const sunsetStart  = new Date(sunset.getTime() - 2 * 60 * 60 * 1000); // -2h
+    const sunsetEnd    = new Date(sunset.getTime() + 60 * 60 * 1000); // +1h
+
+    if (now >= sunriseStart && now <= sunriseEnd) {
+      setTheme("sunrise");
+    } else if (now >= sunsetStart && now <= sunsetEnd) {
+      setTheme("sunset");
+    } else if (now > sunriseEnd && now < sunsetStart) {
+      // Daytime: choose light or dark depending on how close we are to sunset.
+      const midpoint = new Date((sunriseEnd.getTime() + sunsetStart.getTime()) / 2);
+      if (now >= midpoint) {
+        // Closer to evening — prefer dark / sunset presentation by default.
+        setTheme("sunset");
+      } else {
+        setTheme("day");
+      }
+    } else {
+      setTheme("night");
+    }
+  } catch (e) {
+    // fallback: leave default
+    console.warn("Theme application failed:", e);
+  }
 }
 
 function row(data, today, d) {
@@ -326,6 +481,7 @@ async function rate(btn) {
   }
 }
 
+paintThemeToggle(localStorage.getItem(THEME_KEY) || document.body.dataset.theme || "night");
 load();
 </script>
 </body>
