@@ -148,7 +148,7 @@ function render(data) {
   const phase = data.phase || phaseForTheme(theme);
   currentPhase = phase;
   const phaseLabel = phase === "sunrise" ? "Sunrise forecast" : "Sunset forecast";
-  const phaseTitle = phase === "sunrise" ? "First Light" : "Last Light";
+  const phaseTitle = "Golden Hour";
   const phaseSummary = phase === "sunrise" ? data.sunrise_week_summary : data.sunset_week_summary;
   const bestDate = phase === "sunrise" ? data.best_sunrise_date : data.best_sunset_date;
   const best = days.find(d => d.date === bestDate) || days[0];
@@ -156,7 +156,7 @@ function render(data) {
   const bestReason = best[phase]?.scores?.reason ?? best.reason;
   const today = new Date().toLocaleDateString("en-CA");
 
-  document.title = `${phaseTitle} — First Light`;
+  document.title = "Golden Hour";
   app.innerHTML = `
     <section class="phase-head">
       <p class="eyebrow">${phaseLabel}</p>
@@ -238,17 +238,25 @@ function row(data, phase, bestDate, today, d) {
 }
 
 function rateHTML(date, rated) {
-  if (rated) return `<p class="rate"><span class="done">Logged
-    ${rated === 1 ? "as good" : "as a dud"}</span></p>`;
   return `<div class="rate">
-    <button data-rating="1"  data-date="${date}">Was good</button>
-    <button data-rating="-1" data-date="${date}">Wasn't</button>
+    <button data-rating="1" data-date="${date}" aria-pressed="${rated === 1 ? "true" : "false"}">Was good</button>
+    <button data-rating="-1" data-date="${date}" aria-pressed="${rated === -1 ? "true" : "false"}">Wasn't</button>
   </div>`;
+}
+
+function setRatingState(btn, selectedRating) {
+  const buttons = btn.parentElement.querySelectorAll("button");
+  buttons.forEach(b => {
+    const isSelected = b.dataset.rating === String(selectedRating);
+    b.setAttribute("aria-pressed", isSelected ? "true" : "false");
+    b.dataset.selected = isSelected ? "true" : "false";
+  });
 }
 
 async function rate(btn) {
   const { date, rating } = btn.dataset;
-  btn.setAttribute("aria-pressed", "true");
+  const rateWrap = btn.closest(".rate");
+  setRatingState(btn, +rating);
   try {
     const res = await fetch("/api/rate", {
       method: "POST",
@@ -257,10 +265,8 @@ async function rate(btn) {
     });
     if (!res.ok) throw new Error(await res.text());
     ratings[date] = +rating;
-    btn.closest(".rate").outerHTML = rateHTML(date, +rating);
   } catch (e) {
-    btn.closest(".rate").innerHTML =
-      `<span class="done" style="color:var(--ember)">Didn't save — try again</span>`;
+    setRatingState(btn, 0);
     console.error(e);
   }
 }

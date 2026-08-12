@@ -14,6 +14,7 @@ from typing import Protocol
 
 from dotenv import load_dotenv
 
+from ratings import read_all
 from weather import fetch_forecast
 
 load_dotenv()
@@ -154,6 +155,57 @@ def _call_groq(prompt: str, brief: str) -> str:
 PROVIDERS: dict[str, Scorer] = {"gemini": _call_gemini, "groq": _call_groq}
 
 
+def _history_summary(history: list[dict], phase: str) -> str:
+    """Turn a growing personal log into a compact, model-friendly prompt.
+    Keep the summary phase-aware so sunrise and sunset preferences are not
+    mixed together in a single model signal."""
+    if not history:
+        return "Historical user ratings: none yet. Treat this as a fresh start and rely on the current weather plus the written rules."
+
+    phase = phase.lower()
+    phase_rows = [row for row in history if row.get("phase") == phase]
+    if not phase_rows:
+        return f"No historical ratings for {phase} yet. Use the current weather and the general rules as the guide."
+
+    good = [row for row in phase_rows if row.get("rating") == 1]
+    bad = [row for row in phase_rows if row.get("rating") == -1]
+
+    def avg(values):
+        values = [v for v in values if v is not None]
+        if not values:
+            return None
+        return round(sum(values) / len(values), 1)
+
+    lines = [f"Historical user ratings for {phase}:"]
+
+    if good:
+        lines.append(
+            "good ratings for "
+            f"{phase} usually had low cloud around "
+            f"{avg(r['features'].get('cloud_low') for r in good)}%, "
+            f"mid cloud around {avg(r['features'].get('cloud_mid') for r in good)}%, "
+            f"high cloud around {avg(r['features'].get('cloud_high') for r in good)}%, "
+            f"and stacking around {avg(r['features'].get('stacking') for r in good)}%."
+        )
+    else:
+        lines.append(f"No good ratings for {phase} yet.")
+
+    if bad:
+        lines.append(
+            f"bad ratings for {phase} often had low cloud above "
+            f"{avg(r['features'].get('cloud_low') for r in bad)}%, "
+            f"stacking above {avg(r['features'].get('stacking') for r in bad)}%, "
+            f"and fog risk around {avg(r['features'].get('fog_risk_c') for r in bad)}%."
+        )
+    else:
+        lines.append(f"No bad ratings for {phase} yet.")
+
+    recent = phase_rows[-20:]
+    lines.append("Recent examples:")
+    lines.append(json.dumps(recent, indent=2))
+    return "\n".join(lines)
+
+
 def llm_scores(days: list[dict], phase: str, lat: float = 0.0,
                 providers: dict[str, Scorer] | None = None) -> dict:
     """
@@ -191,6 +243,8 @@ def llm_scores(days: list[dict], phase: str, lat: float = 0.0,
         for day in days
     ]
 
+    history_summary = _history_summary(read_all(), phase)
+
     prompt = f"""Latitude {lat}.
 Scoring the {len(days)} {phase}s from {days[0]['date']}.
 At this latitude and season, consider how fast the sun clears the horizon
@@ -199,6 +253,11 @@ and how long any colour is likely to last.
 Conditions at {phase}. Cloud values are percent cover.
 
 {json.dumps(features, indent=2)}
+
+{history_summary}
+
+Use the historical pattern and recent examples above to calibrate your score,
+while remaining faithful to the current conditions in front of you.
 
 Respond with JSON only, no markdown, in exactly this shape:
 {{

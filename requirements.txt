@@ -5,4 +5,4 @@ google-genai
 python-dotenv
 openai
 pytest
-httpx
+httpx2

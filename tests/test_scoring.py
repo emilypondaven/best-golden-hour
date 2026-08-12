@@ -91,6 +91,40 @@ def test_build_report_falls_back_to_rules_when_every_provider_fails():
     assert day["sunrise"]["scores"]["score"] == day["sunrise"]["scores"]["rules_score"]
 
 
+def test_llm_scores_include_recent_history_summary_in_prompt(monkeypatch):
+    history = [
+        {"date": "2026-08-01", "phase": "sunrise", "rating": 1,
+         "features": {"cloud_low": 20, "cloud_mid": 45, "cloud_high": 25,
+                      "stacking": 10, "fog_risk_c": 2, "humidity": 55,
+                      "visibility_km": 15, "rain_chance": 5},
+         "predicted_score": 80, "reason": "good"},
+        {"date": "2026-08-02", "phase": "sunrise", "rating": -1,
+         "features": {"cloud_low": 60, "cloud_mid": 20, "cloud_high": 10,
+                      "stacking": 70, "fog_risk_c": 5, "humidity": 70,
+                      "visibility_km": 8, "rain_chance": 10},
+         "predicted_score": 20, "reason": "bad"},
+    ]
+    monkeypatch.setattr(scoring, "read_all", lambda: history)
+
+    captured = {}
+
+    def fake_call(prompt, brief):
+        captured["prompt"] = prompt
+        return json.dumps({"days": [{"date": "2026-08-10", "score": 75,
+                                     "reason": "ok"}],
+                           "best_date": "2026-08-10",
+                           "week_summary": "ok"})
+
+    scoring.llm_scores(_fake_days(), "sunrise", lat=51.5, providers={"fake": fake_call})
+
+    prompt = captured["prompt"]
+    assert "Historical user ratings" in prompt
+    assert "good ratings" in prompt.lower()
+    assert "bad ratings" in prompt.lower()
+    assert "cloud_low" in prompt
+    assert "2026-08-02" in prompt
+
+
 def test_rules_score_reads_thresholds_from_config():
     neutral_rules = {
         "base_score": 42,

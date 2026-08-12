@@ -19,8 +19,25 @@ _LOCK = threading.Lock()
 
 def append(entry: dict) -> None:
     with _LOCK:
-        with LOG_PATH.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
+        if not LOG_PATH.exists():
+            with LOG_PATH.open("w") as f:
+                f.write("")
+
+        rows = []
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size:
+            rows = [json.loads(line) for line in LOG_PATH.read_text().splitlines() if line.strip()]
+
+        updated = []
+        for row in rows:
+            if row.get("date") == entry.get("date") and row.get("phase") == entry.get("phase"):
+                continue
+            updated.append(row)
+
+        updated.append(entry)
+
+        with LOG_PATH.open("w") as f:
+            for row in updated:
+                f.write(json.dumps(row) + "\n")
 
 
 def read_all() -> list[dict]:
