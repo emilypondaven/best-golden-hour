@@ -45,6 +45,7 @@ Every past date in the UI has both a thumbs up and a thumbs down. Tapping one ap
 
 ## Tests
 
+Run the following command:
 ```bash
 pytest
 ```
